@@ -1,0 +1,1054 @@
+---
+title: "NYC Flights 2013 Report"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+load("C:/Users/Calum/Documents/ST662/ST662 Project datafiles/St662 Project imputed.RData")
+library(plotly)
+library(igraph)
+library(ggnetwork)
+library(sf)
+library(rnaturalearth)
+library(maps)
+library(treemap)
+library(d3treeR)
+library(viridis)
+library(tidyverse)
+library(gganimate)
+library(ggridges)
+library(lubridate)
+library(caret)
+library(leaps)
+library(car)
+library(GGally)
+library(ISLR)
+library(grid)
+library(gridExtra)
+library(gifski)
+library(kableExtra)
+library(spData)
+library(tmap)   
+library(tmaptools)
+```
+
+Introduction
+
+The aim of this report is to outline the factors, both passenger controllable (e.g. the airline used) and uncontrollable (e.g. weather), that most influence whether a flight will arrive late along with the extent of this delay. Our goal is to allow potential passengers to make “smarter” booking decisions in order to minimise the possibility of experiencing delays, while also allowing them to better expect potential delays.
+
+"To do this the report first outlines the details of the underlying data used. Following this, details of delays will be discussed. This will include both basic details of which airline experiences the most delays but will also detail of how severe these delays can be and how they vary by airline. Finally, the delay data relating to airlines is combined with other factors to give a more holistic view of the potential for passengers to face delays. Once identified these factors are combined and used to construct models to predict the potential delays passengers may face." - edit
+
+As the report’s title suggests, the data being considered relates to domestic US flights originating from New York City’s 3 airports (Newark Liberty International, John F Kennedy International and  La Guardia) in 2013. This data is contained in the R ‘nycflights13’ package which contains 5 separate datasets. Details of these datasets can be found in Appendix A. Below we can see a quick overview of where these flights are going.
+
+## Maps
+
+```{r, warning=FALSE, include=TRUE}
+
+# Create edges for network graph
+
+edges <- flights %>%
+  filter(code=="N") %>%
+  group_by(origin,dest) %>%
+  summarise(weight = n())
+
+# Add colour by origin for plot
+
+edges$colour <- as.factor(edges$origin)
+
+# Create graph
+
+g <- graph.data.frame(edges, directed = T)
+
+# Subset graph for number of flights per origin airport
+
+n1 <- induced_subgraph(g, V(g)[-1:-2])
+n2 <- induced_subgraph(g, V(g)[-2:-3])
+n3 <- induced_subgraph(g, V(g)[c(-1,-3)])
+
+# Add number of flights to each vertex
+
+V(g)$weights <- graph.strength(g)
+V(g)[-1:-2]$weights1 <- graph.strength(n1)
+V(g)[1:3]$weights1 <- 0
+V(g)[-2:-3]$weights2 <- graph.strength(n2)
+V(g)[1:3]$weights2 <- 0
+V(g)[c(-1,-3)]$weights3 <- graph.strength(n3)
+V(g)[1:3]$weights3 <- 0
+V(g)$sizes <- V(g)$weights
+V(g)$sizes[1:3] <- mean(V(g)$sizes)
+
+# Link encoded names to actual names
+
+vertices <- data.frame(vname=V(g)$name) %>%
+  left_join(airports, by=c("vname" = "faa"))
+
+# Create hover text info
+
+V(g)$text <- paste(vertices$name,
+                     paste("Flights from LGA: ",format(V(g)$weights1, big.mark=",", trim=T)),
+                     paste("Flights from EWR: ",format(V(g)$weights2, big.mark=",", trim=T)),
+                     paste("Flights from JFK: ",format(V(g)$weights3, big.mark=",", trim=T)),
+                     paste("Total Flights: ",format(V(g)$weights, big.mark=",", trim=T)),
+                     sep = "<br>")
+
+# Add geographical co-ordinates to vertices
+
+V(g)$lat <- vertices$lat
+V(g)$lon <- vertices$lon
+
+# Link edges to vertices
+
+ends <- data.frame(ename=get.edgelist(g)[,2]) %>% left_join(airports, by=c("ename" = "faa"))
+E(g)$elat <- ends$lat
+E(g)$elon <- ends$lon
+
+# Create network
+
+net <- ggnetwork(g)
+
+# Get map data for background
+
+world <- ne_countries(country="United States of America", returnclass = "sf")
+states <- st_as_sf(maps::map("state", plot = FALSE, fill = TRUE))
+
+# Plot network graph
+
+plot <- ggplot(data=net) + geom_sf(data=world, size=0.3, fill = "antiquewhite1") + 
+  geom_sf(data = states, size=0.1, fill = "NA") +
+  geom_edges(mapping=aes(x = lon, y = lat, xend = elon, yend = elat, color=colour), size=0.6, alpha=0.3) +
+  geom_nodes(mapping=aes(x = lon, y = lat, text=text),size=0.01, alpha = 0.6) +
+  geom_text(mapping=aes(x = lon, y = lat, label="&#128743;", size=sizes)) + 
+  scale_radius(range = c(3,6)) +
+  guides(size=F) +
+  theme_blank() +
+  labs(colour = "Airport") +
+  theme(panel.background = element_rect(fill = "aliceblue")) +
+  labs(title="Network Map of US Flights from New York in 2013", subtitle = "(Hover for airport names and flight numbers)")
+
+# Add interactivity
+
+plot %>% ggplotly(tooltip="text", width=900, height=500) %>% layout(
+                    title = list(text = paste0("Network Map of US Flights from New York in 2013","<br>",
+                                               "<sup>","(Hover for airport names and flight numbers)","</sup>")),
+                    xaxis = list(range = c(-125, -65)),
+                    yaxis = list(range = c(24, 50)))
+
+```
+
+```{r, warning=F}
+flights_1 <- flights %>% filter(code=="N")
+nflights <- flights_1 %>% group_by(dest) %>% summarise(n = n(),d=mean(arr_delay)) %>% left_join(airports, by = c("dest"="faa"))
+
+
+g <- list(
+  scope = 'usa',
+  showland = TRUE,
+  landcolor = toRGB("gray95"),
+  subunitcolor = toRGB("gray85"),
+  countrycolor = toRGB("gray85"),
+  countrywidth = 0.5,
+  subunitwidth = 0.5
+)
+
+fig <- plot_geo(nflights, lat = ~lat, lon = ~lon)
+fig <- fig %>% add_markers(
+  text = ~paste(name, dest, paste("Number of flights:", n), paste("Average delay:", d), sep = "<br />"),
+  color = ~d, symbol = I("circle"), colors=viridis_pal(direction = -1,option="B")(104), size = ~n, hoverinfo = "text"
+)
+
+fig <- fig %>% colorbar(title = "Average Delay")
+fig <- fig %>% layout(title = 'Airports<br />(Hover for airport)', geo = g)
+fig
+```
+
+
+``` {r}
+
+
+fly_filt <- flights%>%
+  filter(code=="N")%>%
+    select(year, month, day, sched_dep_time, dep_time, dep_delay, arr_time, arr_delay, carrier, origin, dest, distance)
+
+
+ap_filtered <- airports%>%
+  select(faa, name, lat, lon)%>%
+    rename(origin = faa)
+
+fly_filt <- inner_join(fly_filt, ap_filtered)%>%
+  rename(origin_name = name, origin_lat = lat, origin_lon = lon)%>%
+    select(-origin)
+
+
+ap_filtered <- airports%>%
+  select(faa, name, lat, lon)%>%
+  rename(dest = faa)
+
+fly_filt <- inner_join(fly_filt, ap_filtered)%>%
+  rename(dest_name = name, dest_lat = lat, dest_lon = lon)%>%
+    select(-dest)
+
+#The non-US airports (the ones from overseas dependencies) show as NA so these are being removed
+fly_filt <- fly_filt%>%
+  filter(!is.na(dest_name))
+
+# Create plot data and calcuate distances
+dest_det <- st_as_sf(fly_filt, coords = c('dest_lon', 'dest_lat'), crs = 4326)%>%
+    group_by(dest_name)%>%
+      summarise(count = n())%>%
+        select(dest_name, count, geometry)%>%
+          rename(name = dest_name)
+
+
+
+fly_filt <- fly_filt%>%
+    mutate(time_lost = arr_delay - dep_delay)%>%
+        select(year, month, day, sched_dep_time, dep_time, dep_delay, arr_time, arr_delay, time_lost, carrier, origin_name, dest_name, distance)
+
+#Categorisethe times fo the days to reduce analytic volume
+#No flights between midnight and 5am 
+fly_filt <- fly_filt%>%
+  mutate(Intervals = if_else(sched_dep_time < 900, "Early_Morn",
+                             if_else(sched_dep_time > 859 & sched_dep_time < 1200, "Late_Morn",
+                                     if_else(sched_dep_time > 1159 & sched_dep_time < 1500, "Early_Aft",
+                                             if_else(sched_dep_time > 1459 & sched_dep_time < 1800, "Late_Aft",
+                                                     if_else(sched_dep_time > 1759 & sched_dep_time < 2100, "Early_Eve",
+                                                             "Late_Eve")
+                                                     )
+                                             )
+                                     )
+                             )
+  )
+
+```
+
+``` {r}
+
+sts_con <- us_states %>%
+              select(name = NAME)
+
+sts_als <- alaska%>%
+    select(name = NAME)%>%
+      mutate("count" = 0)
+
+sts_haw <- hawaii%>%
+    select(name = NAME)%>%
+      mutate("count" = 0)
+
+dest_us <- dest_det%>% 
+  filter(!(name %in% c("Honolulu Intl", "Ted Stevens Anchorage Intl")))%>%
+  st_transform(crs = st_crs(us_states))
+
+dest_a <- dest_det%>% 
+  filter(name == "Ted Stevens Anchorage Intl")%>%
+  st_transform(crs = st_crs(alaska))
+
+dest_h <- dest_det%>% 
+  filter(name == "Honolulu Intl")%>%
+  st_transform(crs = st_crs(hawaii))
+
+brks_seq <- seq(1, max(dest_us$count, by = 250))
+sz <- .25
+
+US_Map <- 
+  tm_shape(sts_con) +
+    tm_polygons()+
+      tm_layout(frame = FALSE)+
+  tm_shape(dest_us) +
+    tm_dots(size = sz, col = "count", legend.show = FALSE, breaks = brks_seq)+
+        tm_layout(frame = FALSE)
+
+
+  tm_shape(sts_con) +
+    tm_polygons()+
+      tm_layout(frame = FALSE)+
+  tm_shape(dest_us) +
+    tm_bubbles("count", breaks = brks_seq)+
+        tm_layout(frame = FALSE)
+  
+  
+H_map <- 
+  tm_shape(sts_haw) +
+    tm_polygons()+
+      tm_layout(frame = FALSE)+
+  tm_shape(dest_h) +
+    tm_dots(size = sz, col = "count", legend.show = FALSE, breaks = brks_seq)+
+      tm_layout(frame = FALSE)
+
+A_Map <-
+  tm_shape(sts_als) +
+    tm_polygons()+
+      tm_layout(frame = FALSE)+
+  tm_shape(dest_a) +
+    tm_dots(size = sz, col = "count", legend.show = FALSE, breaks = brks_seq)+
+      tm_layout(frame = FALSE)
+
+US_Map
+print(H_map, vp = grid::viewport(0.45, 0.1, width = 0.2, height = 0.1))
+print(A_Map, vp = grid::viewport(0.15, 0.15, width = 0.3, height = 0.3))
+```
+
+## Proportion of airlines plots:
+
+```{r, warning=FALSE}
+flights_1 <- flights %>%
+  filter(code=="N") %>%
+  left_join(airports, by=c("origin"="faa")) %>%
+  left_join(airlines, by="carrier") %>%
+  select(c("name.x","name.y"))
+names(flights_1)<-c("origin_airport","carrier_name")
+marketshare <- flights_1 %>% group_by(carrier_name) %>% summarise(count=n())
+flights_1$carrier_name <- factor(flights_1$carrier_name, levels = marketshare$carrier_name[order(-marketshare$count)]) 
+g <- ggplot(flights_1,aes(x=carrier_name,fill=origin_airport))+
+  geom_bar()+
+  ylab("Count of Flight")+
+  xlab("Airline")+
+  theme( axis.text.x = element_text(angle = 45))
+ggplotly(g)
+
+```
+
+
+```{r, warning=FALSE, include=F}
+flights_1 <- flights %>%
+  filter(code=="N") %>%
+  left_join(airports, by=c("origin"="faa")) %>%
+  left_join(airlines, by="carrier") %>%
+  select(c("name.x","name.y"))
+names(flights_1)<-c("origin_airport","carrier_name")
+marketshare <- flights_1 %>% group_by(carrier_name, origin_airport) %>% summarise(count=n())
+g <- treemap(marketshare,
+            index=c("carrier_name","origin_airport"),
+            vSize="count",
+            type="index",
+            palette = viridis(16,begin=0.1,end=0.9),
+            )
+```
+
+Click to zoom in and see distribution per origin airport. Click title to zoom back out.
+
+```{r, warning=FALSE}
+d3tree2(g  ,rootname = "Proportion of flights per airline", width = 500, height = 300)
+```
+
+
+```{r, warning=FALSE, fig.height = 10}
+flights_1 <- flights %>%
+  filter(code=="N") %>%
+  left_join(airports, by=c("origin"="faa")) %>%
+  left_join(airlines, by="carrier") %>%
+  select(c("name.x","name.y"))
+
+names(flights_1)<-c("origin","carrier")
+
+share <- flights_1 %>% 
+  filter(!(carrier %in% c("Alaska Airlines Inc.", "Frontier Airlines Inc.", 
+                          "Hawaiian Airlines Inc.", "Mesa Airlines Inc.", "SkyWest Airlines Inc.")))%>%
+  group_by(carrier, origin) %>% 
+    summarise(count=n())
+  
+share <- share %>%
+  mutate(perc = 100*count/sum(share$count))
+
+wdths <- share%>%
+  group_by(carrier)%>%
+    summarise(wdt = sum(perc))%>%
+      arrange(wdt)%>%
+        mutate(pos = cumsum(wdt)-wdt/2)
+
+share <- full_join(share, wdths, by = "carrier")
+     
+ggplot(data = share)+
+  geom_bar(aes(fill = origin, x=pos, y = perc, width = wdt), colour = 'white', position = 'fill', stat = 'identity')+ 
+  scale_x_continuous(label = share$carrier, breaks = share$pos)+
+  scale_fill_manual(values = c('skyblue2', 'dodgerblue2', 'steelblue4'))+
+  coord_flip()+
+  theme(legend.position = 'bottom')+
+  labs(x='Airline', y = 'Proportion in given airport')
+
+```
+
+## Flights delay by dest
+
+
+
+
+``` {r}
+
+# Convert day perids to factors
+fly_filt$Intervals <- factor(fly_filt$Intervals)
+
+fly_filt <- fly_filt%>%
+  mutate(dist_grp = cut_width(distance, 1000, center = 500))
+
+levels(fly_filt$Intervals) <- c("Early_Morn", "Late_Morn", "Early_Aft", "Late_Aft", "Early_Eve", "Late_Eve")
+
+
+p <- fly_filt %>% filter(arr_delay>5)%>%
+  nrow()/nrow(fly_filt)
+
+paste("Percentage of flights that are late", sprintf("%.2f %%", 100*p))
+
+p <- fly_filt %>% filter(arr_delay>30)%>%
+  nrow()/nrow(fly_filt)
+
+paste("Percentage of flights more than half an hour late", sprintf("%.2f %%", 100*p))
+
+p <- fly_filt %>% filter(arr_delay>60)%>%
+  nrow()/nrow(fly_filt)
+
+paste("Percentage of flights more than an hour late", sprintf("%.2f %%", 100*p))
+
+p <- fly_filt %>% filter(arr_delay>120)%>%
+  nrow()/nrow(fly_filt)
+
+paste("Percentage of flights more than 2 hours late", sprintf("%.2f %%", 100*p))
+
+
+p <- fly_filt%>%
+  filter(arr_delay > -sort(-fly_filt$arr_delay)[21])%>%
+  mutate(cal_date = dmy(paste(day, month, year, sep = ' ')))%>%
+    select(cal_date, dep_time, dep_delay, arr_time, arr_delay, carrier, origin_name, dest_name, distance)
+
+print(kable(p, caption = "Most delayed flights", format = "markdown"))
+
+fly_filt %>% filter(arr_delay>5)%>%
+  group_by(dest_name)%>%
+  summarise(c = n())%>%
+    arrange(-c)
+```
+
+
+## Flights delay/early per carrier
+
+``` {r fig.align="center", fig.height=3.5, fig.width = 10}
+# Remove cancelled/diverted flights and merge airports and flights datasets
+plot_a <- flights%>%
+  filter(code=="N")%>%
+  full_join(airlines, by="carrier")%>%
+  mutate(type = "On Time")
+
+plot_a$arr_delay <- ifelse(is.na(plot_a$arr_delay), 
+                       (60*floor(plot_a$arr_time/100) + plot_a$arr_time%%100 - 
+                          (60*floor(plot_a$sched_arr_time/100) + plot_a$sched_arr_time%%100))%%1440,
+                        plot_a$arr_delay)
+
+plot_a$type <- ifelse(plot_a$arr_delay > 10, "Late, within 30 minutes", plot_a$type)
+plot_a$type <- ifelse(plot_a$arr_delay > 30, "Late, between 30 min and 1 hour", plot_a$type)
+plot_a$type <- ifelse(plot_a$arr_delay > 60, "Late, between 1 and 2 hours", plot_a$type)
+plot_a$type <- ifelse(plot_a$arr_delay > 120, "Late, over 2 hours", plot_a$type)
+plot_a$type <- ifelse(plot_a$arr_delay < -10, "Ahead of Schedule", plot_a$type)
+plot_a$type <- ifelse(is.na(plot_a$arr_time), "Diverted", plot_a$type)
+plot_a$type <- ifelse(is.na(plot_a$dep_time), "Cancelled", plot_a$type)
+
+
+
+plot_a <- plot_a%>%
+  group_by(name, type)%>%
+    summarise(count = n())
+
+plot_a1 <- plot_a%>%
+  group_by(name)%>%
+    summarise(tot = sum(count))
+
+plot_a2 <- plot_a%>%
+  group_by(type)%>%
+    summarise(tot = sum(count))%>%
+      mutate(perc = tot/sum(tot))
+
+
+plot_a <- full_join(plot_a, plot_a1, by="name")%>%
+  mutate(perc = count/tot)%>%
+  select(name, type, perc)
+
+p1_avg <- sum(filter(plot_a2, type %in% c("On Time", "Ahead of Schedule"))$perc)
+p2_avg <- sum(filter(plot_a2, type %in% c("Late, over 2 hours", "Late, between 1 and 2 hours"))$perc)
+
+p1 <- plot_a%>%
+  filter(type %in% c("On Time", "Ahead of Schedule"))%>%
+    group_by(name)%>%
+      summarise(perc = sum(perc))%>%
+        arrange(perc)
+
+p1$name <- factor(p1$name, p1$name)
+
+p1_p <- ggplot()+
+  geom_bar(data = p1, aes(y = perc*100, x= name), fill = ifelse(p1$perc > p1_avg, "green4", "red2"), 
+            width = 0.5, stat = 'identity')+
+  geom_hline(aes(yintercept = p1_avg*100))+
+  labs(y = 'Total Flights (%)', x = 'Airline', title = 'On time, or early')+
+  theme(text = element_text(size=9))+
+  coord_flip(ylim = c(50, 85), )
+
+
+p2 <- plot_a%>%
+  filter(type %in% c("Late, over 2 hours", "Late, between 1 and 2 hours"))%>%
+    group_by(name)%>%
+      summarise(perc = sum(perc))%>%
+        arrange(-perc)
+
+
+p2$name <- factor(p2$name, p2$name)
+
+p2_p <- ggplot()+
+  geom_bar(data = p2, aes(y = perc*100, x= name), fill = ifelse(p2$perc < p2_avg, "green4", "red2"), 
+            width = 0.5, stat = 'identity')+
+  geom_hline(aes(yintercept = p2_avg*100))+
+  coord_flip()+
+  labs(y = 'Total Flights (%)', x = 'Airline', title = 'Delayed by over 1 hour')+
+              theme(text = element_text(size=9))
+
+
+grid.arrange(p1_p, p2_p, ncol= 2,
+            top ='Comparison of on time and heavily delayed flights')
+
+plot_a$type <- factor(plot_a$type, levels = c("Cancelled",
+                                              "Diverted",
+                                              "Late, over 2 hours", 
+                                              "Late, between 1 and 2 hours",
+                                              "Late, between 30 min and 1 hour", 
+                                              "Late, within 30 minutes", 
+                                              "On Time",
+                                              "Ahead of Schedule"))
+
+```
+
+
+```{r}
+datafly <- flights %>% filter(code=="N")
+ggdata <- datafly %>% group_by(carrier) %>% summarise(avg_mean = mean(arr_delay),num = n()) %>% arrange(avg_mean) %>% left_join(airlines,by="carrier")
+
+ggdata_new = mutate(ggdata, col = paste(carrier , "- (" , round(avg_mean,2),")"))
+top_1 <- (slice(ggdata_new,1))$name
+title <- paste("Airline ",top_1," is more on time than others")
+ggdata_new %>%
+  ggplot( aes(x=num, y=avg_mean, group=carrier, color=carrier)) +
+  geom_label(aes(label = col),nudge_x = 7,nudge_y = 2) + ggplot2::geom_point() +
+  scale_color_viridis(discrete = TRUE) +
+  theme(
+    legend.position="none",
+    plot.title = element_text(size=12)
+  ) +  coord_cartesian(xlim = c(-3000,70000),ylim=c(-10,30)) +
+  ggtitle(title) 
+```
+  
+## analysis of flights by day of week/hour/month
+  
+```{r}
+
+
+ssdata <- head(arrange(datafly,time_hour) %>% 
+                filter(dep_delay <= 0) %>% 
+                group_by(time_hour) %>%
+                count(weekdays(as.POSIXct(time_hour))) %>% 
+                arrange(desc(n)),200) %>% 
+                separate(time_hour,c("Date","Time"),sep=" ") %>% 
+                separate(Time,c("Hr","mm","ss"),sep=":")
+
+
+
+g <- ggplot(ssdata, aes(x=`weekdays(as.POSIXct(time_hour))`, y=Hr,color=n,size=n)) + geom_point(stat="identity") + transition_time(as.integer(rownames(ssdata))) +  geom_text(aes(label=n),nudge_y = 0.25) + ease_aes('linear',interval=12)+ theme_bw() + labs(x="Weekdays",y="hour")
+
+animate(g,duration=400,width=400,height=400)
+
+```
+
+```{r}
+ssdata <- arrange(datafly,time_hour) %>% 
+                group_by(weekdays(time_hour),hour(time_hour)) %>%
+                summarise(n_total=n(), n_early=sum(dep_delay<=0)) %>%
+                mutate(p_early = n_early/n_total)
+                
+names(ssdata)[1:2] <- c("Weekday","Hour")
+
+
+names(ssdata)[1:2] <- c("Weekday","Hour")
+ssdata$Weekday <- factor(ssdata$Weekday, levels=c("Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"))
+
+g <- ggplot(ssdata, aes(x=Weekday, y=Hour,fill=p_early)) + geom_tile()
+g
+```
+
+```{r}
+noofinst <- arrange(datafly,time_hour) %>% group_by(time_hour) %>% 
+    group_by(origin) %>% select( flight,carrier,origin,month,time_hour,sched_dep_time,dep_delay) %>% arrange(desc(origin)) %>% arrange(sched_dep_time) %>% group_by(origin,time_hour) %>% select(carrier) %>% count(time_hour)  %>% separate(time_hour,c("Date","Time"),sep=" ") %>% 
+separate(Time,c("Hr","mm","ss"),sep=":")
+
+h <- ggplot(noofinst,aes(x=Hr,y=n,group=origin,color=origin))+geom_point()+geom_line() + transition_reveal(as.integer(rownames(noofinst))) + theme_bw() + labs(x="Time",y="Noofflight")
+
+animate(h,width=400,height=400,start_pause=20,end_pause = 20)
+```
+
+
+```{r}
+#Checking the number flight per month per origin
+
+origin_num <- flights %>% 
+   filter(code=="N") %>%
+   group_by(month, origin) %>%
+   summarise(count = n())
+
+#Checking the number of departures per month for each origins.
+
+O_JFK<-origin_num %>% filter(origin =='JFK')
+O_EWR<-origin_num %>% filter(origin =='EWR')
+O_LGA<-origin_num %>% filter(origin =='LGA')
+
+#Comparing the number of flights from each origin per month.
+
+ggplot()+
+  geom_line(data = O_JFK, aes(x = month, y = count), color = "blue") +
+  geom_line(data = O_EWR, aes(x = month, y = count), color = "red") +
+  geom_line(data = O_LGA, aes(x = month, y = count), color = "black")
+
+```
+
+We can see that EWR is operating consistantly the maximum number of flights to other destinations followed by JFK(2nd highest) and LGA (3rd).
+
+We can see a different trend during the montn of August to September where the flights departed from EWR aand JFK has been reduced but for LGA the flights departed to other destinations has been slightly increased.
+
+load("St662 Project imputed.RData")
+
+
+
+```{r}
+
+# ------------------ Plot 1 -------------------------
+
+
+delay_per_month <- flights %>% filter(code=="N") %>% group_by(month) %>% summarise(avg_delay = mean(dep_delay))
+
+
+g1 <- ggplot(delay_per_month, aes(x=month, y= avg_delay)) +
+  geom_segment( aes(x=month, xend=month, y=0, yend=avg_delay), color = "brown") +
+  geom_point( color="darkblue", size=4, alpha=0.6) +
+  theme_light() +
+  coord_flip() +
+  theme(
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    panel.grid.minor.y = element_blank(),
+    panel.grid.major.y = element_blank(),
+    panel.border = element_blank(),
+    axis.ticks.y = element_blank())+
+   theme(plot.margin = unit(c(0.7,0.7,0.7,0.7), "cm"))+
+  scale_x_discrete(labels = month.abb[c(1:12)])+
+  xlab("Month")+ ylab("Average Departure Delay (in minutes)")
+# ------------------ Plot 2 -------------------------
+
+
+delay_per_hour <- flights %>% filter(code=="N") %>% group_by(hour) %>% summarise(avg_delay = mean(dep_delay, na.rm = TRUE))
+
+
+g2 <- ggplot(delay_per_hour, aes(x=hour, y= avg_delay)) +
+  geom_segment( aes(x=hour, xend=hour, y=0, yend=avg_delay), color = "brown") +
+  geom_line()+
+  geom_point( color="darkblue", size=4, alpha=0.6) +
+  theme_light() +
+  theme(
+    panel.grid.major.y = element_blank(),
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    panel.grid.minor.y = element_blank(),
+    panel.border = element_blank(),
+    axis.ticks.y = element_blank())+
+   theme(plot.margin = unit(c(0.7,0.7,0.7,0.7), "cm"))+
+  coord_flip()+
+  scale_x_continuous(name="Hour of the day", breaks = seq(0, 23, by = 1))+
+  scale_y_continuous(name="Average Departure Delay (in minutes)", breaks = seq(0, 25, by = 5))
+grid.arrange(g1, g2, ncol=2, nrow = 1, top = textGrob("Departure Delay Statistics",
+                                                      gp=gpar(fontsize=18,font=3, col ="darkblue")))
+```
+
+```{r}
+
+# ------------------ Plot 3 -------------------------
+
+
+delay_per_day <- flights_model %>% group_by(day) %>% summarise(avg_delay = mean(dep_delay, na.rm = TRUE))
+
+
+g3 <- ggplot(delay_per_day, aes(x=day, y= avg_delay)) +
+  # geom_segment( aes(x=day, xend=day, y=0, yend=avg_delay), color = " brown")
+  geom_line()+
+  geom_point( color="skyblue", size=4, alpha=0.6) +
+  theme_light() +
+  theme(
+    panel.grid.major.y = element_blank(),
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    panel.grid.minor.y = element_blank(),
+    panel.border = element_blank(),
+    axis.ticks.y = element_blank())+
+   theme(plot.margin = unit(c(0.7,0.7,0.7,0.7), "cm"))+
+  # coord_flip()+
+  scale_x_continuous(name="Day", breaks = seq(1, 31, by = 1))+
+  scale_y_continuous(name="Average Departure Delay (in minutes)", breaks = seq(0, 30, by = 5))
+
+g3
+
+```
+
+
+```{r}
+data <- flights %>% filter(code=="N")  %>%
+  mutate(q = quarter(time_hour))
+data$q = as.factor(data$q)
+d1 <- data %>% group_by(q) %>% summarise(avg_delay = mean(dep_delay, na.rm = TRUE))
+d1 %>%  
+  ggplot( aes(x=q, y=avg_delay, fill=q)) +
+  geom_col(width = 0.7) +
+  scale_fill_viridis(discrete = TRUE, alpha=0.6) +
+  theme_light()+
+  theme(
+    axis.text=element_text(size=12),
+    axis.title=element_text(size=14,face="bold"),
+    plot.title = element_text(size=17, colour = "darkblue"),
+    legend.position="none",
+    panel.grid.major.y = element_blank(),
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    panel.grid.minor.y = element_blank(),
+    panel.border = element_blank(),
+    axis.ticks.y = element_blank()
+  ) + 
+  coord_flip()+
+  ggtitle("Departure Delay For Each Quarter of 2013") +
+  xlab("Quarter") + ylab("Average Departure Delay (in minutes)")
+```
+
+
+## Plots for weather
+
+```{r}
+ggcorr(weather[, c(7:11,13:15)], method = c("everything", "pearson"), nbreaks = 4, 
+       palette = "RdGy", label = TRUE, label_size = 4, label_round = 2,
+       label_color="white", legend.size = 12) 
+```
+
+```{r}
+#Checking delayed and non-delayed flights. 
+delayed <- filter(flights,dep_delay>0,code=="N")
+not_delayed <- filter(flights,dep_delay<=0,code=="N")
+
+#Checking delays by origin and time hour.
+delay_th_origin <- group_by(delayed,origin,time_hour)
+
+#Checking counts of total delays in each time hour. 
+add_delaycount<- summarize(delay_th_origin,tot_delay = mean(dep_delay),
+count = n())
+
+#Merging weather data by origin and time hour.
+join_weather <- merge(add_delaycount, weather,by=c("origin","time_hour"))
+
+#Grouping by wind_speed to see trends between delays and the weather variables
+mer_ws <- group_by(join_weather,wind_speed)
+
+avgdelay_ws <- summarize(mer_ws,avg_dep_delay_t = mean(tot_delay))
+
+ws_delay<-ggplot(avgdelay_ws, aes(x = wind_speed, y = avg_dep_delay_t)) + geom_point() + geom_smooth(method = "lm") +labs(x = "Wind Speed in mph", y="Avg. Departure delay in minutes", title = "Wind Speed vs. Avg. departure delay")
+
+ggplotly(ws_delay)
+
+```
+
+From the above we can say that there is linear relation between increase in wind speed and departure delay. There are few outliars can be observed as well.
+
+
+
+```{r}
+#delays due to visibility
+mer_viz <- group_by(join_weather,visib)
+
+#Checking counts of total delays in each time hour due to visibility
+viz_delay <- summarize(mer_viz,avg_dep_delay_t = mean(tot_delay))
+
+#Checking avg. dep_delay count per visibility
+num_of_delay_per_viz = summarize(mer_viz,Avg_Delay_Count_Per_Viz = mean(count))
+
+visibilty_delay <- ggplot(viz_delay, aes(x = visib, y = avg_dep_delay_t, color=avg_dep_delay_t)) + geom_point() + geom_smooth(method = "lm") +labs(x = "Visibility in miles",
+y="Average Departure Delay in minutes",
+title = "Visibility vs. Average Departure Delay")
+
+ggplotly(visibilty_delay)
+
+```
+
+```{r}
+weather_1 <- weather
+weather_1$month <- as.factor(weather_1$month)
+weather_1$day <- as.factor(weather_1$day)
+weather_1$hour <- as.factor(weather_1$hour)
+
+
+delayed <- filter(flights,dep_delay>0, code=="N")
+not_delayed <- filter(flights,dep_delay<=0, code=="N")
+
+
+
+
+
+grouped = group_by(delayed, origin, time_hour)
+sum_delay_count = summarize(grouped, totaldelay = mean(dep_delay), count = n())
+
+combined = merge(sum_delay_count, weather,by=c("origin","time_hour"))
+#grouping by visibility 
+by_visib <- combined %>% group_by(visib)
+
+#Calculating average delay in time per visib
+avg_delay_v = by_visib %>% summarize(avg_dep_delay_time = mean(totaldelay))
+
+#Calculating average dep_delay count per visib
+number_of_delay_per_visib = by_visib %>% summarize(Avg_Delay_Count_Per_Visib = mean(count))
+p1 <- ggplot(avg_delay_v, aes(x = visib, y = avg_dep_delay_time))+
+  geom_point() + 
+  geom_smooth(method = "loess", color = "red") +
+  labs(x = "Visibility (miles)", y="Average Departure Delay Time (minutes)",
+title = "Average Departure Delay Time vs Visibility")
+
+p1
+
+```
+
+
+```{r}
+p2 <- ggplot(number_of_delay_per_visib, aes(x = visib, y = Avg_Delay_Count_Per_Visib))
+p2 + geom_point()+ geom_smooth(method = "loess", color = "red") +labs(x = "Visibility (miles)",
+y="Average Number of Delays",
+title = "Average Number of Delays vs Visibility")
+```
+
+## Model for departure delay prediction
+
+```{r}
+
+weather_1 <- weather
+planes_1 <- planes
+weather_1$weather_id<-nrow(weather)
+planes_1$planes_id<-nrow(planes)
+
+
+fl_we <- flights_model %>% left_join(weather_1[,c(1,6:16)], c("origin","time_hour"))
+fl_we_pl <- fl_we %>% left_join(planes_1, by =  "tailnum")
+
+
+
+fl_we_pl<-fl_we_pl%>%
+  filter(is.na(planes_id)!=1,is.na(weather_id)!=1)
+
+sum(is.na(fl_we_pl$planes_id))
+sum(is.na(fl_we_pl$weather_id))
+
+
+flights_model_1<-fl_we_pl%>%
+  mutate(flag=ifelse(dep_delay<=0,0,ifelse(dep_delay<=15,1,ifelse(dep_delay<=45,2,3))))
+
+table(flights_model_1$flag)
+
+#### variables for making model
+
+data_model<-flights_model_1%>%
+  mutate(planes_age=ifelse((2013-year.y)>30,30,(2013-year.y)),
+         dep_hour=as.numeric(ifelse(nchar(sched_dep_time)==4,substr(sched_dep_time,1,2),substr(sched_dep_time,1,1)))
+  )%>%
+  select(flag,month,dep_hour,carrier,origin,planes_age,seats,
+         temp,dewp,humid,wind_dir,wind_speed,pressure,visib,precip)%>%
+  filter(is.na(planes_age)!=1)
+
+
+######### model trying
+#### logistic
+
+data_model_1<-data_model%>%
+  mutate(flag=ifelse(flag %in% c("1", "0"),1,0))%>%
+  select(flag,month,dep_hour,
+         planes_age,seats, 
+         temp,dewp,humid,wind_dir,wind_speed,pressure,visib,precip,
+         origin)
+
+# move: carrier ,wind_dir+
+set.seed(123)
+s<-sample(nrow(data_model_1),0.6*nrow(data_model_1))
+data_model_train<-data_model_1[s,]
+data_model_test<-data_model_1[-s,]
+
+
+
+
+fit_log <- glm(flag ~month+dep_hour+                      # departure time
+                 planes_age+seats+                        # plane's type
+                 temp+dewp+humid+wind_speed+pressure+visib+precip+
+                 origin,
+               data = data_model_train, family = binomial())
+
+
+summary(fit_log)
+
+
+## for train # 
+predictions <- predict(fit_log,data_model_train,type = "response")%>%
+  round(digits = 2)
+
+
+data_model_train<-data_model_train%>%
+  mutate(pred_outcome =ifelse(predictions > 0.5,1,0))
+
+sum(data_model_train$flag!=data_model_train$pred_outcome)/nrow(data_model_train)
+
+## for test # 
+
+predictions_test <- predict(fit_log,data_model_test,type = "response")%>%
+  round(digits = 2)
+
+
+data_model_test<-data_model_test%>%
+  mutate(pred_outcome =ifelse(predictions_test > 0.5,1,0))
+
+table(data_model_test$flag,data_model_test$pred_outcome)
+
+
+sum(data_model_test$flag!=data_model_test$pred_outcome)/nrow(data_model_test)
+
+
+# total data
+
+data_model_train$ts<-"train"
+data_model_test$ts<-"test"
+
+data_plot<-rbind(data_model_train[,c("ts","flag","pred_outcome")],data_model_test[,c("ts","flag","pred_outcome")])
+
+data_plot<-data_plot%>%
+  mutate(right=ifelse(flag==pred_outcome,"right","wrong"))
+
+tab2<-table(data_plot$right,data_plot$ts)
+
+cols <- c("seagreen3","steelblue4", "purple2", "sienna1","slategray3")
+
+barplot(prop.table(tab2,2),beside=TRUE,col=cols[1:2],
+        legend.text=TRUE,args.legend= (list(x=13.5,y=.7)))
+        
+```
+
+
+
+
+
+## Model for Arrival delay prediction
+
+
+```{r}
+#Fitted GLM model to predict arrival delay using some important predictors from weather dataset and flights dataset which.
+flights.2013 <-
+  flights_model %>%
+  left_join(
+    weather %>% select(
+      origin,
+      temp,
+      dewp,
+      humid,
+      wind_dir,
+      wind_speed,
+      wind_gust,
+      precip,
+      pressure,
+      visib,
+      time_hour
+    ),
+    by = c("origin", "time_hour")
+    )%>%
+  left_join(airlines, by = c("carrier" = "carrier")) %>%
+  rename(Airline = name) %>%
+  left_join(airports %>% select(faa, name, lat, lon, alt),
+            by = c("origin" = "faa"))  %>%
+  na.omit()
+
+#Added variable quarter which defines which quarter of the year.
+flights.2013$quarter<-as.character(quarter(flights.2013$time_hour))
+
+
+#removing unwanted predictors.
+flights.2013 <- flights.2013[, -c(1:5,7,8,10:15,17:21,23,27,28,35)]
+
+# Create Training and Test data 
+set.seed(100)
+n <- nrow(flights.2013)
+trainingRows <- sample(n, 0.7*n)
+training <- flights.2013[trainingRows, ] # model training data
+test <- flights.2013[-trainingRows, ]   # test data
+
+#--------------------------------------------------------- 
+
+# Check these outlier numbers, I switched to flights_model data subset
+  
+#Major oultiers which impacted the model
+#training <- training[-c(16618, 849,19556),]
+
+#--------------------------------------------------------
+
+
+#Fitting linear model
+glm.delay <-step(glm(arr_delay ~. , data = training), direction ="both")
+summary(glm.delay)
+
+#test correlation
+pred.step.t <- predict(glm.delay, newdata = test, type = "response")
+test$predt<-pred.step.t
+
+#correlation between actual and predicted
+cor(test$predt,test$arr_delay)*100
+
+#training correlation
+pred.step.tr <- predict(glm.delay, type = "response")
+training$predtr<-pred.step.tr
+
+#correlation between actual and predicted
+cor(training$predtr,training$arr_delay)*100
+
+#Graph between actual and predicted values
+g2<-ggplot(test, aes(
+  x = arr_delay,
+  y = predt
+  )) +
+  geom_point() +
+  geom_line(aes(x=arr_delay,y=arr_delay))+
+  xlab("Actual values") +
+  ylab("Predicted values") +
+  ggtitle("Actual vs predicted values") +
+  theme(axis.text.x = element_text(face = "bold", size = 10, angle = 45))
+ggplotly(g2)
+
+#Mean squared error value
+mean((test$predt-test$arr_delay)^2)
+
+#diagnostic plots
+plot(glm.delay)
+
+```
+
+
+```{r,message=FALSE,warning=FALSE}
+
+#Testing the model 
+#CrossValidation taking 7 folds
+k<-7
+nrow(flights.2013)
+## [1] 77434
+fold <- as.numeric(cut_number(1:nrow(flights.2013), k))
+
+#Taking Sample Fold
+fold <- sample(fold,length(fold))
+fsize <- table(fold)
+
+mse <- vector(length=k)
+
+#Checking Error for every K folds
+for (i in 1:k){
+foldi <- flights.2013[fold==i,]
+foldOther <- flights.2013[fold!=i,]
+f <- lm(arr_delay ~ ., foldOther)
+pred <- predict(f, foldi)
+mse[i] <- mean((pred - foldi$arr_delay)^2) # MSEi
+}
+
+#Mean Error for the Model
+mean(mse)
+```
